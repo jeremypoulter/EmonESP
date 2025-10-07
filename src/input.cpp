@@ -33,6 +33,53 @@
 String input_string="";
 String last_datastr="";
 
+bool parse_json_line(String &line, JsonDocument &data)
+{
+  DeserializationError err = deserializeJson(data, line);
+  if(err) {
+    DEBUG.printf_P(PSTR("deserializeJson() failed: %s\n"), err.c_str());
+    return false;
+  }
+  return true;
+}
+
+bool parse_emon_tx(String &line, JsonDocument &data)
+{
+  bool gotData = false;
+  int len = line.length();
+
+  for(int i = 0; i < len; i++)
+  {
+    String name = "";
+
+    // Get the name
+    while (i < len && line[i] != ':') {
+      name += line[i++];
+    }
+
+    if (i++ >= len) {
+      break;
+    }
+
+    // Get the value
+    String value = "";
+    while (i < len && line[i] != ','){
+      value += line[i++];
+    }
+
+    DBUGVAR(name);
+    DBUGVAR(value);
+
+    if(name.length() > 0 && value.length() > 0)
+    {
+      // IMPROVE: check that value is only a number, toDouble() will skip white space and and chars after the number
+      data[name] = value.toDouble();
+      gotData = true;
+    }
+  }
+  return gotData;
+}
+
 bool input_get(JsonDocument &data)
 {
   bool gotLine = false;
@@ -58,38 +105,16 @@ bool input_get(JsonDocument &data)
     line.trim();
 
     int len = line.length();
-    if(len > 0) 
+    if(len > 0)
     {
       DEBUG.printf_P(PSTR("Got '%s'\n"), line.c_str());
 
-      for(int i = 0; i < len; i++)
-      {
-        String name = "";
-
-        // Get the name
-        while (i < len && line[i] != ':') {
-          name += line[i++];
-        }
-
-        if (i++ >= len) {
-          break;
-        }
-
-        // Get the value
-        String value = "";
-        while (i < len && line[i] != ','){
-          value += line[i++];
-        }
-
-        DBUGVAR(name);
-        DBUGVAR(value);
-
-        if(name.length() > 0 && value.length() > 0)
-        {
-          // IMPROVE: check that value is only a number, toDouble() will skip white space and and chars after the number
-          data[name] = value.toDouble();
-          gotData = true;
-        }
+      if(line.startsWith("{")) {
+        // Expecting JSON format {"CT1":3935,"CT2":325,"T1":12.5,"T2":16.9,"T3":11.2,"T4":34.7}
+        gotData = parse_json_line(line, data);
+      } else {
+        // Expecting emonTx format CT1:3935,CT2:325,T1:12.5,T2:16.9,T3:11.2,T4:34.7
+        gotData = parse_emon_tx(line, data);
       }
     }
   }
@@ -102,6 +127,7 @@ bool input_get(JsonDocument &data)
     data[F("psuccess")] = packets_success;
 
     last_datastr.clear();
+    DBUGLN(last_datastr);
     serializeJson(data, last_datastr);
   }
 
