@@ -33,6 +33,7 @@
 #include "mqtt.h"
 #include "http.h"
 #include "autoauth.h"
+#include "emontx_update.h"
 #include <NTPClient.h>
 
 WiFiUDP ntpUDP;
@@ -111,6 +112,10 @@ void setup() {
   timeClient.begin();
   DBUGF("After timeClient.begin: %d", ESP.getFreeHeap());
   
+  // Initialize EmonTX firmware update
+  emontx_update_setup();
+  DBUGF("After emontx_update_setup: %d", ESP.getFreeHeap());
+  
   delay(100);
 
   start_mem = last_mem = ESP.getFreeHeap();
@@ -141,6 +146,7 @@ void loop()
   ota_loop();
   web_server_loop();
   wifi_loop();
+  emontx_update_loop();
   timeClient.update();
 
   StaticJsonDocument<512> data;

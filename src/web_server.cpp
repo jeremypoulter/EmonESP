@@ -41,6 +41,7 @@
 #include "emoncms.h"
 #include "ota.h"
 #include "debug.h"
+#include "emontx_update.h"
 #include <NTPClient.h>
 #include "espal.h"
 
@@ -548,6 +549,14 @@ void handleStatus(AsyncWebServerRequest *request)
   doc[F("ctrl_mode")] = ctrl_mode;
   doc[F("ctrl_state")] = ctrl_state;
   doc[F("ota_update")] = (int)Update.isRunning();
+  
+  // EmonTX programmer status
+  doc[F("emontx_programmer")] = (int)emontx_update_available();
+  if (emontx_update_available()) {
+    AVRISPState_t state = emontx_update_state();
+    doc[F("emontx_prog_state")] = (state == AVRISP_STATE_IDLE) ? "idle" : 
+                                   (state == AVRISP_STATE_PENDING) ? "pending" : "active";
+  }
 
   response->setCode(200);
   serializeJson(doc, *response);
@@ -872,6 +881,44 @@ void handleCtrlMode(AsyncWebServerRequest *request)
   request->send(response);
 }
 
+// -------------------------------------------------------------------
+// Handle EmonTX programmer status request
+// url: /emontx/programmer
+// -------------------------------------------------------------------
+void handleEmonTxProgrammer(AsyncWebServerRequest *request)
+{
+  AsyncResponseStream *response;
+  if (false == requestPreProcess(request, response))
+  {
+    return;
+  }
+
+  const size_t capacity = JSON_OBJECT_SIZE(10) + 256;
+  DynamicJsonDocument doc(capacity);
+
+  doc[F("available")] = emontx_update_available();
+  
+  if (emontx_update_available()) {
+    AVRISPState_t state = emontx_update_state();
+    doc[F("state")] = (state == AVRISP_STATE_IDLE) ? "idle" : 
+                      (state == AVRISP_STATE_PENDING) ? "pending" : "active";
+    doc[F("port")] = EMONTX_AVRISP_PORT;
+    doc[F("reset_pin")] = EMONTX_RESET_PIN;
+    
+    IPAddress local_ip = WiFi.localIP();
+    String avrdude_cmd = "avrdude -c arduino -p m328p -P net:";
+    avrdude_cmd += local_ip.toString();
+    avrdude_cmd += ":";
+    avrdude_cmd += String(EMONTX_AVRISP_PORT);
+    avrdude_cmd += " -U flash:w:firmware.hex:i";
+    doc[F("avrdude_command")] = avrdude_cmd;
+  }
+
+  response->setCode(200);
+  serializeJson(doc, *response);
+  request->send(response);
+}
+
 void handleDebug(AsyncWebServerRequest *request, StreamSpy &spy)
 {
   AsyncResponseStream *response;
@@ -1017,6 +1064,7 @@ void web_server_setup()
   server.on("/lastvalues", handleLastValues);
 
   server.on("/emoncms/describe", handleDescribe);
+  server.on("/emontx/programmer", handleEmonTxProgrammer);
   server.on("/time", handleTime);
   server.on("/ctrlmode", handleCtrlMode);
   server.on("/vout", handleSetVout);
