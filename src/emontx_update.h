@@ -27,10 +27,6 @@
 #define _EMONTX_UPDATE_H
 
 #include <Arduino.h>
-#include <ESP8266AVRISP.h>
-
-// Default port for AVR programming
-#define EMONTX_AVRISP_PORT 328
 
 // Reset pin for EmonTX (GPIO pin connected to EmonTX reset)
 // Using GPIO 4 (D2 on NodeMCU) as default, can be configured
@@ -38,24 +34,26 @@
 #define EMONTX_RESET_PIN 4
 #endif
 
-// SPI frequency for programming (300kHz is safe default)
-#define EMONTX_SPI_FREQ 300000
+// Baud rate for programming (38400 works well for 8MHz ATmega328)
+#define EMONTX_PROG_BAUD_RATE 38400
 
-extern ESP8266AVRISP *emontx_programmer;
+// Flash result codes
+#define FLASH_SUCCESS 0
+#define FLASH_ERROR_FILE_NOT_FOUND 1
+#define FLASH_ERROR_FILE_READ 2
+#define FLASH_ERROR_SYNC 3
+#define FLASH_ERROR_ADDRESS 4
+#define FLASH_ERROR_PAGE_WRITE 5
+#define FLASH_ERROR_LEAVE_PROG 6
 
 // Initialize the EmonTX firmware update system
 void emontx_update_setup();
 
-// Process any pending AVR programming requests
-void emontx_update_loop();
+// Flash firmware from a hex file in the filesystem
+// Returns FLASH_SUCCESS (0) on success, error code otherwise
+int emontx_flash_firmware(const char* hexFilePath);
 
-// Get the current programming state
-AVRISPState_t emontx_update_state();
-
-// Check if programmer is available and ready
-bool emontx_update_available();
-
-// Helper to convert AVR ISP state to string
-const char* emontx_state_to_string(AVRISPState_t state);
+// Get human-readable error message for flash result code
+const char* emontx_flash_error_string(int errorCode);
 
 #endif // _EMONTX_UPDATE_H

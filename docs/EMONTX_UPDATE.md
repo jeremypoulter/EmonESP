@@ -1,130 +1,219 @@
-# EmonTX Firmware Update Feature
+# EmonTX Firmware Update via Serial
 
 ## Overview
 
-The EmonESP now includes the ability to update the firmware on connected EmonTX devices (ATmega328-based) over WiFi. This feature uses the ESP8266AVRISP library to implement the STK500 programming protocol over TCP/IP.
+EmonESP now supports updating the firmware on connected EmonTX devices (ATmega328-based) via the existing UART/serial connection. This uses the STK500 protocol to communicate with the Optiboot bootloader on the EmonTX.
+
+## How It Works
+
+The EmonESP acts as a serial programmer, implementing the STK500 protocol to communicate with the Optiboot bootloader on the EmonTX. The firmware is uploaded as an Intel HEX file to the ESP8266's filesystem, then programmed to the EmonTX over the serial connection.
+
+### Key Features
+
+- **Serial Programming**: Uses the existing UART connection between EmonESP and EmonTX
+- **STK500 Protocol**: Compatible with standard Arduino bootloaders (Optiboot)
+- **Web Upload**: Upload firmware hex files via HTTP
+- **Intel HEX Format**: Supports standard Arduino compiler output format
 
 ## Hardware Requirements
 
-- EmonESP device (ESP8266-based)
-- EmonTX device (ATmega328-based) connected via SPI
-- Proper wiring between ESP8266 and EmonTX:
-  - GPIO12 → MISO
-  - GPIO13 → MOSI
-  - GPIO14 → SCK
-  - GPIO4 (default) → RESET
+### Connections
 
-**Important:** If the EmonTX runs at 5V and ESP8266 at 3.3V, you **must use level shifters** to protect the ESP8266 from damage.
+The EmonTX must be connected to the EmonESP via UART:
+- EmonTX TX → ESP8266 RX (Serial)
+- EmonTX RX → ESP8266 TX (Serial)
+- EmonTX RESET → ESP8266 GPIO4 (configurable)
+- GND common
+
+**Important:** The EmonTX must have the Optiboot bootloader installed (standard on Arduino boards).
+
+### Voltage Levels
+
+If the EmonTX runs at 5V and ESP8266 at 3.3V, you need a voltage divider or level shifter on the EmonTX TX → ESP8266 RX line to protect the ESP8266.
+
+Example voltage divider:
+- EmonTX TX → 1kΩ resistor → ESP8266 RX
+- ESP8266 RX → 2kΩ resistor → GND
 
 ## Configuration
 
-The reset pin can be configured by defining `EMONTX_RESET_PIN` in your build flags if you need to use a different GPIO pin:
+The reset pin can be configured by defining `EMONTX_RESET_PIN` in your build flags:
 
 ```ini
 build_flags = 
   -DEMONTX_RESET_PIN=5  ; Use GPIO5 instead of default GPIO4
 ```
 
+The programming baud rate defaults to 38400, which works well for 8MHz ATmega328 chips with Optiboot.
+
 ## Usage
 
-### Programming via avrdude
+### Step 1: Compile Your EmonTX Firmware
 
-Once the EmonESP is connected to your WiFi network, you can program the connected EmonTX using avrdude from your computer:
+Compile your EmonTX firmware using the Arduino IDE or PlatformIO. Make sure to export the compiled binary in Intel HEX format (`.hex` file).
+
+In Arduino IDE: Sketch → Export Compiled Binary
+
+### Step 2: Upload Firmware to EmonESP
+
+Upload the hex file to the EmonESP via HTTP POST:
 
 ```bash
-avrdude -c arduino -p m328p -P net:<ESP_IP_ADDRESS>:328 -U flash:w:firmware.hex:i
+curl -F "file=@firmware.hex" http://<ESP_IP>/emontx/upload
 ```
 
-Replace `<ESP_IP_ADDRESS>` with the IP address of your EmonESP device.
+Or use a web form/interface.
 
-### Checking Programmer Status
+### Step 3: Flash the Firmware
 
-You can check the programmer status via HTTP:
+Trigger the programming process:
 
 ```bash
-curl http://<ESP_IP_ADDRESS>/emontx/programmer
+curl -X POST http://<ESP_IP>/emontx/flash
 ```
 
 Response example:
 ```json
 {
-  "available": 1,
-  "state": "idle",
-  "port": 328,
-  "reset_pin": 4,
-  "avrdude_command": "avrdude -c arduino -p m328p -P net:192.168.1.100:328 -U flash:w:firmware.hex:i"
+  "success": true,
+  "code": 0,
+  "message": "Success"
 }
 ```
 
-The `/status` endpoint also includes programmer information:
+### Complete Example
+
 ```bash
-curl http://<ESP_IP_ADDRESS>/status
+# Upload firmware
+curl -F "file=@emontx_v3.hex" http://192.168.1.100/emontx/upload
+
+# Flash to EmonTX
+curl -X POST http://192.168.1.100/emontx/flash
 ```
 
-### mDNS Discovery
+## Programming Process
 
-The programmer registers itself as an avrisp service via mDNS, making it discoverable on the local network.
+When you trigger `/emontx/flash`, the EmonESP:
 
-## Programming States
+1. Switches the serial port to programming baud rate (38400)
+2. Resets the EmonTX to enter the bootloader
+3. Synchronizes with the Optiboot bootloader using STK500
+4. Parses the Intel HEX file
+5. Programs each page of flash memory
+6. Leaves programming mode
+7. Restores normal serial communication
+8. Resets the EmonTX to start the new firmware
 
-The programmer has three states:
-
-1. **idle**: No active programming session, EmonTX is running normally
-2. **pending**: TCP connection established, waiting for programming commands
-3. **active**: Actively programming the EmonTX
-
-During programming, the EmonTX will be held in reset and will not be able to send data.
+The entire process typically takes 10-30 seconds depending on firmware size.
 
 ## Troubleshooting
 
-### Connection Issues
+### "Failed to sync with bootloader"
 
-- Ensure the ESP8266 and your computer are on the same network
-- Check firewall settings allow TCP port 328
-- Verify the EmonTX reset line is properly connected
+**Possible causes:**
+- EmonTX doesn't have Optiboot bootloader installed
+- Wrong baud rate for your EmonTX clock speed
+- Reset pin not properly connected
+- Serial connection issues
 
-### Programming Errors
+**Solutions:**
+- Verify Optiboot is installed on EmonTX
+- Try different baud rates (19200, 38400, 57600, 115200)
+- Check reset pin wiring
+- Verify TX/RX connections
 
-- If you get "programmer not responding" errors, check the SPI wiring
-- Ensure proper level shifting if voltage levels differ
-- Try lowering the avrdude baud rate: add `-b 115200` to the avrdude command
+### "Failed to write flash page"
 
-### Wiring Issues
+**Possible causes:**
+- Corrupted hex file
+- Serial communication errors
+- Timing issues
 
-- Double-check all SPI connections (MISO, MOSI, SCK, RESET)
-- Ensure ground is common between ESP8266 and EmonTX
-- Verify the reset pin configuration matches your hardware
+**Solutions:**
+- Re-export the hex file from Arduino IDE
+- Check serial connection quality
+- Ensure proper voltage levels (use level shifters if needed)
+
+### Programming Never Completes
+
+**Possible causes:**
+- EmonTX is not being reset properly
+- Bootloader timeout (bootloader only waits ~1 second after reset)
+
+**Solutions:**
+- Check reset pin connection
+- Ensure reset pin is HIGH normally, pulled LOW to reset
+- Verify GPIO pin number matches `EMONTX_RESET_PIN`
 
 ## Technical Details
 
-- **Protocol**: STK500 over TCP/IP (port 328)
-- **SPI Frequency**: 300 kHz (safe default)
-- **Library**: ESP8266AVRISP (built into ESP8266 Arduino core)
-- **Reset Logic**: Active-low by default (configurable)
+### STK500 Protocol
 
-## Security Considerations
+The implementation uses a subset of the STK500v1 protocol that Optiboot supports:
+- `STK_GET_SYNC`: Synchronize with bootloader
+- `STK_ENTER_PROGMODE`: Enter programming mode
+- `STK_LOAD_ADDRESS`: Set flash address
+- `STK_PROG_PAGE`: Program a page of flash
+- `STK_LEAVE_PROGMODE`: Leave programming mode
 
-The avrisp service is exposed on the network without authentication. If this is a concern:
+### Intel HEX Format
 
-1. Use network segmentation to isolate IoT devices
-2. Use firewall rules to restrict access to port 328
-3. Enable WiFi encryption (WPA2/WPA3)
+The parser supports standard Intel HEX format:
+- `:LLAAAATT[DD...]CC` format
+- Record types: Data (00), End of File (01)
+- 128-byte page size (ATmega328 flash page size)
 
-## Example Programming Session
+### Baud Rates
 
-```bash
-# 1. Check that the programmer is available
-curl http://emonesp.local/emontx/programmer
+Recommended baud rates based on ATmega328 clock speed:
+- 8 MHz (internal): 38400
+- 16 MHz (external crystal): 57600 or 115200
 
-# 2. Upload new firmware to EmonTX
-avrdude -c arduino -p m328p -P net:emonesp.local:328 -U flash:w:emontx_firmware.hex:i
+## API Reference
 
-# 3. Verify the upload was successful
-# The EmonTX should start running the new firmware immediately after programming
+### POST /emontx/upload
+
+Upload a firmware hex file.
+
+**Content-Type**: `multipart/form-data`
+
+**Parameters**:
+- `file`: The .hex firmware file
+
+**Response**: `200 OK` with upload confirmation message
+
+### POST /emontx/flash
+
+Program the uploaded firmware to the EmonTX.
+
+**Response**: JSON with result
+```json
+{
+  "success": true/false,
+  "code": 0,  // 0 = success, >0 = error code
+  "message": "Success"  // Human-readable status
+}
 ```
+
+**Error Codes**:
+- 0: Success
+- 1: Firmware file not found
+- 2: Failed to read firmware file
+- 3: Failed to sync with bootloader
+- 4: Failed to set flash address
+- 5: Failed to write flash page
+- 6: Failed to leave programming mode
+
+## Safety Notes
+
+- **Backup**: Always keep a backup of working firmware
+- **Power**: Ensure stable power during programming
+- **Interruption**: Do not interrupt the programming process
+- **Testing**: Test new firmware thoroughly before deployment
 
 ## References
 
-- [ESP8266AVRISP Library](https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266AVRISP)
-- [avrdude Documentation](https://www.nongnu.org/avrdude/)
-- [STK500 Protocol](http://www.atmel.com/images/doc0943.pdf)
+- [Optiboot Bootloader](https://github.com/Optiboot/optiboot)
+- [STK500 Protocol](https://github.com/Optiboot/optiboot/blob/master/optiboot/bootloaders/optiboot/stk500.h)
+- [Intel HEX Format](https://en.wikipedia.org/wiki/Intel_HEX)
+- [AVR Bootloaders](https://www.nongnu.org/avr-libc/user-manual/group__avr__boot.html)

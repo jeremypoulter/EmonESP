@@ -112,7 +112,7 @@ void setup() {
   timeClient.begin();
   DBUGF("After timeClient.begin: %d", ESP.getFreeHeap());
   
-  // Initialize EmonTX firmware update
+  // Initialize EmonTX firmware update (serial programming)
   emontx_update_setup();
   DBUGF("After emontx_update_setup: %d", ESP.getFreeHeap());
   
@@ -146,7 +146,6 @@ void loop()
   ota_loop();
   web_server_loop();
   wifi_loop();
-  emontx_update_loop();
   timeClient.update();
 
   StaticJsonDocument<512> data;

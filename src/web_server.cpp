@@ -549,13 +549,6 @@ void handleStatus(AsyncWebServerRequest *request)
   doc[F("ctrl_mode")] = ctrl_mode;
   doc[F("ctrl_state")] = ctrl_state;
   doc[F("ota_update")] = (int)Update.isRunning();
-  
-  // EmonTX programmer status
-  doc[F("emontx_programmer")] = (int)emontx_update_available();
-  if (emontx_update_available()) {
-    AVRISPState_t state = emontx_update_state();
-    doc[F("emontx_prog_state")] = emontx_state_to_string(state);
-  }
 
   response->setCode(200);
   serializeJson(doc, *response);
@@ -881,10 +874,37 @@ void handleCtrlMode(AsyncWebServerRequest *request)
 }
 
 // -------------------------------------------------------------------
-// Handle EmonTX programmer status request
-// url: /emontx/programmer
+// Handle EmonTX firmware upload
+// url: /emontx/upload
 // -------------------------------------------------------------------
-void handleEmonTxProgrammer(AsyncWebServerRequest *request)
+static File emonTxFirmwareFile;
+static String emonTxFirmwareFilename;
+
+void handleEmonTxFirmwareUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final)
+{
+  if (!index) {
+    DBUGF("EmonTX firmware upload start: %s", filename.c_str());
+    emonTxFirmwareFilename = "/emontx_" + filename;
+    emonTxFirmwareFile = SPIFFS.open(emonTxFirmwareFilename, "w");
+    if (!emonTxFirmwareFile) {
+      DBUGLN("Failed to open file for writing");
+      return;
+    }
+  }
+  
+  if (emonTxFirmwareFile) {
+    emonTxFirmwareFile.write(data, len);
+  }
+  
+  if (final) {
+    if (emonTxFirmwareFile) {
+      emonTxFirmwareFile.close();
+    }
+    DBUGF("EmonTX firmware upload complete: %u bytes", index + len);
+  }
+}
+
+void handleEmonTxFirmwarePost(AsyncWebServerRequest *request)
 {
   AsyncResponseStream *response;
   if (false == requestPreProcess(request, response))
@@ -892,27 +912,50 @@ void handleEmonTxProgrammer(AsyncWebServerRequest *request)
     return;
   }
 
-  const size_t capacity = JSON_OBJECT_SIZE(10) + 256;
-  DynamicJsonDocument doc(capacity);
-
-  doc[F("available")] = emontx_update_available();
-  
-  if (emontx_update_available()) {
-    AVRISPState_t state = emontx_update_state();
-    doc[F("state")] = emontx_state_to_string(state);
-    doc[F("port")] = EMONTX_AVRISP_PORT;
-    doc[F("reset_pin")] = EMONTX_RESET_PIN;
-    
-    IPAddress local_ip = WiFi.localIP();
-    String avrdude_cmd = "avrdude -c arduino -p m328p -P net:";
-    avrdude_cmd += local_ip.toString();
-    avrdude_cmd += ":";
-    avrdude_cmd += String(EMONTX_AVRISP_PORT);
-    avrdude_cmd += " -U flash:w:firmware.hex:i";
-    doc[F("avrdude_command")] = avrdude_cmd;
+  if (emonTxFirmwareFilename.length() == 0) {
+    response->setCode(400);
+    response->print(F("No file uploaded"));
+    request->send(response);
+    return;
   }
 
   response->setCode(200);
+  response->print(F("Upload complete. Call /emontx/flash to program the firmware."));
+  request->send(response);
+}
+
+void handleEmonTxFlash(AsyncWebServerRequest *request)
+{
+  AsyncResponseStream *response;
+  if (false == requestPreProcess(request, response, CONTENT_TYPE_JSON))
+  {
+    return;
+  }
+
+  if (emonTxFirmwareFilename.length() == 0) {
+    response->setCode(400);
+    response->print(F("{\"error\":\"No firmware file uploaded\"}"));
+    request->send(response);
+    return;
+  }
+
+  DBUGF("Starting EmonTX firmware flash: %s", emonTxFirmwareFilename.c_str());
+  int result = emontx_flash_firmware(emonTxFirmwareFilename.c_str());
+  
+  const size_t capacity = JSON_OBJECT_SIZE(3) + 128;
+  DynamicJsonDocument doc(capacity);
+  
+  doc[F("success")] = (result == FLASH_SUCCESS);
+  doc[F("code")] = result;
+  doc[F("message")] = emontx_flash_error_string(result);
+  
+  if (result == FLASH_SUCCESS) {
+    // Clean up the firmware file after successful flash
+    SPIFFS.remove(emonTxFirmwareFilename);
+    emonTxFirmwareFilename = "";
+  }
+  
+  response->setCode(result == FLASH_SUCCESS ? 200 : 500);
   serializeJson(doc, *response);
   request->send(response);
 }
@@ -1062,7 +1105,6 @@ void web_server_setup()
   server.on("/lastvalues", handleLastValues);
 
   server.on("/emoncms/describe", handleDescribe);
-  server.on("/emontx/programmer", handleEmonTxProgrammer);
   server.on("/time", handleTime);
   server.on("/ctrlmode", handleCtrlMode);
   server.on("/vout", handleSetVout);
@@ -1074,6 +1116,10 @@ void web_server_setup()
 
   server.on("/firmware", handleUpdateCheck);
   server.on("/update", handleUpdate);
+  
+  // EmonTX firmware upload and flashing
+  server.on("/emontx/upload", HTTP_POST, handleEmonTxFirmwarePost, handleEmonTxFirmwareUpload);
+  server.on("/emontx/flash", HTTP_POST, handleEmonTxFlash);
 
   // Remote debug consoles
   server.on("/debug", [](AsyncWebServerRequest *request)

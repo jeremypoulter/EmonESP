@@ -1,6 +1,6 @@
 /*
  * -------------------------------------------------------------------
- * EmonESP Serial to Emoncms gateway
+ * EmonESP Serial to Emoncms gateway  
  * -------------------------------------------------------------------
  * Adaptation of Chris Howells OpenEVSE ESP Wifi
  * by Trystan Lea, Glyn Hudson, OpenEnergyMonitor
@@ -26,88 +26,291 @@
 #include "emontx_update.h"
 #include "emonesp.h"
 #include "debug.h"
-#include <SPI.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
+#include <FS.h>
 
-ESP8266AVRISP *emontx_programmer = NULL;
+// STK500 protocol constants
+// Based on: https://github.com/Optiboot/optiboot/blob/master/optiboot/bootloaders/optiboot/stk500.h
+#define STK_OK              0x10
+#define STK_INSYNC          0x14
+#define STK_CRC_EOP         0x20
+#define STK_GET_SYNC        0x30
+#define STK_ENTER_PROGMODE  0x50
+#define STK_LEAVE_PROGMODE  0x51
+#define STK_LOAD_ADDRESS    0x55
+#define STK_PROG_PAGE       0x64
+#define STK_READ_SIGN       0x75
+
+#define BOOTLOADER_TIMEOUT  1000  // ms
+
+static uint8_t resetPin = EMONTX_RESET_PIN;
+static uint32_t normalBaudRate = 115200;
+
+// Helper functions
+static void resetTarget() {
+  digitalWrite(resetPin, LOW);
+  delay(50);
+  digitalWrite(resetPin, HIGH);
+  delay(50);
+}
+
+static bool waitForResponse(uint8_t expected, uint32_t timeout_ms) {
+  uint32_t start = millis();
+  while (millis() - start < timeout_ms) {
+    if (EMONTX_PORT.available()) {
+      uint8_t c = EMONTX_PORT.read();
+      if (c == expected) {
+        return true;
+      }
+    }
+    yield();
+  }
+  return false;
+}
+
+static bool sendCommand(uint8_t cmd) {
+  EMONTX_PORT.write(cmd);
+  EMONTX_PORT.write(STK_CRC_EOP);
+  EMONTX_PORT.flush();
+  
+  if (!waitForResponse(STK_INSYNC, BOOTLOADER_TIMEOUT)) {
+    return false;
+  }
+  if (!waitForResponse(STK_OK, BOOTLOADER_TIMEOUT)) {
+    return false;
+  }
+  return true;
+}
+
+static bool syncBootloader() {
+  // Try multiple times to sync with bootloader
+  for (int attempt = 0; attempt < 5; attempt++) {
+    // Clear any pending data
+    while (EMONTX_PORT.available()) {
+      EMONTX_PORT.read();
+    }
+    
+    if (sendCommand(STK_GET_SYNC)) {
+      return true;
+    }
+    delay(50);
+  }
+  return false;
+}
+
+static bool setAddress(uint16_t address) {
+  // Address in words (not bytes) for ATmega
+  uint16_t wordAddress = address >> 1;
+  
+  EMONTX_PORT.write(STK_LOAD_ADDRESS);
+  EMONTX_PORT.write(wordAddress & 0xFF);
+  EMONTX_PORT.write((wordAddress >> 8) & 0xFF);
+  EMONTX_PORT.write(STK_CRC_EOP);
+  EMONTX_PORT.flush();
+  
+  if (!waitForResponse(STK_INSYNC, BOOTLOADER_TIMEOUT)) {
+    return false;
+  }
+  if (!waitForResponse(STK_OK, BOOTLOADER_TIMEOUT)) {
+    return false;
+  }
+  return true;
+}
+
+static bool programPage(uint16_t address, uint8_t* data, uint16_t length) {
+  if (!setAddress(address)) {
+    return false;
+  }
+  
+  EMONTX_PORT.write(STK_PROG_PAGE);
+  EMONTX_PORT.write((length >> 8) & 0xFF);
+  EMONTX_PORT.write(length & 0xFF);
+  EMONTX_PORT.write('F');  // Flash memory
+  
+  for (uint16_t i = 0; i < length; i++) {
+    EMONTX_PORT.write(data[i]);
+  }
+  
+  EMONTX_PORT.write(STK_CRC_EOP);
+  EMONTX_PORT.flush();
+  
+  if (!waitForResponse(STK_INSYNC, BOOTLOADER_TIMEOUT)) {
+    return false;
+  }
+  if (!waitForResponse(STK_OK, BOOTLOADER_TIMEOUT)) {
+    return false;
+  }
+  return true;
+}
+
+// Parse Intel HEX format and program the device
+// Simple parser for :LLAAAATT[DD...]CC format
+static int programHexFile(File& hexFile) {
+  uint8_t pageBuffer[128];  // ATmega328 has 128-byte pages
+  uint16_t pageAddress = 0;
+  uint16_t pageIndex = 0;
+  bool pageStarted = false;
+  
+  while (hexFile.available()) {
+    String line = hexFile.readStringUntil('\n');
+    line.trim();
+    
+    if (line.length() == 0 || line[0] != ':') {
+      continue;
+    }
+    
+    // Parse HEX record
+    uint8_t byteCount = strtol(line.substring(1, 3).c_str(), NULL, 16);
+    uint16_t address = strtol(line.substring(3, 7).c_str(), NULL, 16);
+    uint8_t recordType = strtol(line.substring(7, 9).c_str(), NULL, 16);
+    
+    if (recordType == 0x00) {  // Data record
+      // Check if this is a new page
+      if (!pageStarted || (address & 0xFF80) != (pageAddress & 0xFF80)) {
+        // Write previous page if it exists
+        if (pageStarted && pageIndex > 0) {
+          if (!programPage(pageAddress, pageBuffer, pageIndex)) {
+            return FLASH_ERROR_PAGE_WRITE;
+          }
+        }
+        
+        // Start new page
+        pageAddress = address;
+        pageIndex = 0;
+        pageStarted = true;
+        memset(pageBuffer, 0xFF, sizeof(pageBuffer));
+      }
+      
+      // Add data to page buffer
+      for (uint8_t i = 0; i < byteCount; i++) {
+        uint8_t dataByte = strtol(line.substring(9 + i*2, 11 + i*2).c_str(), NULL, 16);
+        uint16_t offset = (address + i) & 0x7F;  // Offset within page
+        pageBuffer[offset] = dataByte;
+        if (offset >= pageIndex) {
+          pageIndex = offset + 1;
+        }
+      }
+    } else if (recordType == 0x01) {  // End of file
+      // Write final page
+      if (pageStarted && pageIndex > 0) {
+        // Pad to page boundary
+        while (pageIndex < 128) {
+          pageBuffer[pageIndex++] = 0xFF;
+        }
+        if (!programPage(pageAddress, pageBuffer, 128)) {
+          return FLASH_ERROR_PAGE_WRITE;
+        }
+      }
+      break;
+    }
+    
+    yield();  // Allow ESP8266 to handle WiFi, etc.
+  }
+  
+  return FLASH_SUCCESS;
+}
 
 void emontx_update_setup() {
-  DBUGLN("Initializing EmonTX firmware update system");
+  pinMode(resetPin, OUTPUT);
+  digitalWrite(resetPin, HIGH);
   
-  // Create the programmer instance (singleton, lifetime of device)
-  // Note: This is intentionally not deleted as it should persist for the device lifetime
-  emontx_programmer = new ESP8266AVRISP(
-    EMONTX_AVRISP_PORT,
-    EMONTX_RESET_PIN,
-    EMONTX_SPI_FREQ,
-    false,  // reset_state (false = target runs normally)
-    false   // reset_activehigh (false = active low reset)
-  );
-  
-  // Let the AVR run (don't hold it in reset)
-  emontx_programmer->setReset(false);
-  
-  // Start listening for programming connections
-  emontx_programmer->begin();
-  
-  // Register mDNS service for discovery
-  MDNS.addService("avrisp", "tcp", EMONTX_AVRISP_PORT);
-  
-  DBUGF("EmonTX programmer ready on port %d", EMONTX_AVRISP_PORT);
-  DBUGF("Use: avrdude -c arduino -p m328p -P net:%s:%d -U flash:w:firmware.hex:i", 
-        WiFi.localIP().toString().c_str(), EMONTX_AVRISP_PORT);
+  DBUGLN("EmonTX serial programmer initialized");
+  DBUGF("Reset pin: GPIO%d", resetPin);
 }
 
-void emontx_update_loop() {
-  if (emontx_programmer == NULL) {
-    return;
+int emontx_flash_firmware(const char* hexFilePath) {
+  DBUGF("Starting EmonTX firmware update from: %s", hexFilePath);
+  
+  // Check if file exists
+  if (!SPIFFS.exists(hexFilePath)) {
+    DBUGLN("Firmware file not found");
+    return FLASH_ERROR_FILE_NOT_FOUND;
   }
   
-  static AVRISPState_t last_state = AVRISP_STATE_IDLE;
-  AVRISPState_t new_state = emontx_programmer->update();
-  
-  if (last_state != new_state) {
-    switch (new_state) {
-      case AVRISP_STATE_IDLE:
-        DBUGLN("[EmonTX] Programmer idle");
-        break;
-      case AVRISP_STATE_PENDING:
-        DBUGLN("[EmonTX] Programming connection pending");
-        break;
-      case AVRISP_STATE_ACTIVE:
-        DBUGLN("[EmonTX] Programming in progress");
-        break;
-    }
-    last_state = new_state;
+  File hexFile = SPIFFS.open(hexFilePath, "r");
+  if (!hexFile) {
+    DBUGLN("Failed to open firmware file");
+    return FLASH_ERROR_FILE_READ;
   }
   
-  // Always serve to handle incoming connections and programming requests
-  emontx_programmer->serve();
-}
-
-AVRISPState_t emontx_update_state() {
-  if (emontx_programmer == NULL) {
-    return AVRISP_STATE_IDLE;
+  // Store current baud rate
+  normalBaudRate = EMONTX_PORT.baudRate();
+  
+  // Switch to programming baud rate
+  EMONTX_PORT.flush();
+  EMONTX_PORT.end();
+  EMONTX_PORT.begin(EMONTX_PROG_BAUD_RATE);
+  
+  // Reset target to enter bootloader
+  resetTarget();
+  
+  // Clear serial buffer
+  while (EMONTX_PORT.available()) {
+    EMONTX_PORT.read();
   }
-  // Note: update() checks for state changes, doesn't perform actions
-  // This is safe to call multiple times per request cycle
-  return emontx_programmer->update();
+  
+  // Sync with bootloader
+  DBUGLN("Syncing with bootloader...");
+  if (!syncBootloader()) {
+    DBUGLN("Failed to sync with bootloader");
+    hexFile.close();
+    EMONTX_PORT.end();
+    EMONTX_PORT.begin(normalBaudRate);
+    return FLASH_ERROR_SYNC;
+  }
+  
+  DBUGLN("Bootloader synchronized");
+  
+  // Enter programming mode
+  sendCommand(STK_ENTER_PROGMODE);
+  
+  // Program the firmware
+  DBUGLN("Programming firmware...");
+  int result = programHexFile(hexFile);
+  
+  hexFile.close();
+  
+  if (result != FLASH_SUCCESS) {
+    DBUGF("Programming failed with error: %d", result);
+    EMONTX_PORT.end();
+    EMONTX_PORT.begin(normalBaudRate);
+    return result;
+  }
+  
+  // Leave programming mode
+  DBUGLN("Leaving programming mode...");
+  if (!sendCommand(STK_LEAVE_PROGMODE)) {
+    DBUGLN("Warning: Failed to leave programming mode cleanly");
+    // Don't return error - firmware is already written
+  }
+  
+  // Restore normal baud rate
+  EMONTX_PORT.end();
+  EMONTX_PORT.begin(normalBaudRate);
+  
+  // Reset to start new firmware
+  resetTarget();
+  
+  DBUGLN("Firmware update completed successfully");
+  return FLASH_SUCCESS;
 }
 
-bool emontx_update_available() {
-  return (emontx_programmer != NULL);
-}
-
-const char* emontx_state_to_string(AVRISPState_t state) {
-  switch (state) {
-    case AVRISP_STATE_IDLE:
-      return "idle";
-    case AVRISP_STATE_PENDING:
-      return "pending";
-    case AVRISP_STATE_ACTIVE:
-      return "active";
+const char* emontx_flash_error_string(int errorCode) {
+  switch (errorCode) {
+    case FLASH_SUCCESS:
+      return "Success";
+    case FLASH_ERROR_FILE_NOT_FOUND:
+      return "Firmware file not found";
+    case FLASH_ERROR_FILE_READ:
+      return "Failed to read firmware file";
+    case FLASH_ERROR_SYNC:
+      return "Failed to sync with bootloader";
+    case FLASH_ERROR_ADDRESS:
+      return "Failed to set flash address";
+    case FLASH_ERROR_PAGE_WRITE:
+      return "Failed to write flash page";
+    case FLASH_ERROR_LEAVE_PROG:
+      return "Failed to leave programming mode";
     default:
-      return "unknown";
+      return "Unknown error";
   }
 }
