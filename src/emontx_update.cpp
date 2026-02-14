@@ -35,7 +35,8 @@ ESP8266AVRISP *emontx_programmer = NULL;
 void emontx_update_setup() {
   DBUGLN("Initializing EmonTX firmware update system");
   
-  // Create the programmer instance
+  // Create the programmer instance (singleton, lifetime of device)
+  // Note: This is intentionally not deleted as it should persist for the device lifetime
   emontx_programmer = new ESP8266AVRISP(
     EMONTX_AVRISP_PORT,
     EMONTX_RESET_PIN,
@@ -96,4 +97,17 @@ AVRISPState_t emontx_update_state() {
 
 bool emontx_update_available() {
   return (emontx_programmer != NULL);
+}
+
+const char* emontx_state_to_string(AVRISPState_t state) {
+  switch (state) {
+    case AVRISP_STATE_IDLE:
+      return "idle";
+    case AVRISP_STATE_PENDING:
+      return "pending";
+    case AVRISP_STATE_ACTIVE:
+      return "active";
+    default:
+      return "unknown";
+  }
 }

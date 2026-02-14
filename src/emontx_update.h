@@ -55,4 +55,7 @@ AVRISPState_t emontx_update_state();
 // Check if programmer is available and ready
 bool emontx_update_available();
 
+// Helper to convert AVR ISP state to string
+const char* emontx_state_to_string(AVRISPState_t state);
+
 #endif // _EMONTX_UPDATE_H

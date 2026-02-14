@@ -554,8 +554,7 @@ void handleStatus(AsyncWebServerRequest *request)
   doc[F("emontx_programmer")] = (int)emontx_update_available();
   if (emontx_update_available()) {
     AVRISPState_t state = emontx_update_state();
-    doc[F("emontx_prog_state")] = (state == AVRISP_STATE_IDLE) ? "idle" : 
-                                   (state == AVRISP_STATE_PENDING) ? "pending" : "active";
+    doc[F("emontx_prog_state")] = emontx_state_to_string(state);
   }
 
   response->setCode(200);
@@ -900,8 +899,7 @@ void handleEmonTxProgrammer(AsyncWebServerRequest *request)
   
   if (emontx_update_available()) {
     AVRISPState_t state = emontx_update_state();
-    doc[F("state")] = (state == AVRISP_STATE_IDLE) ? "idle" : 
-                      (state == AVRISP_STATE_PENDING) ? "pending" : "active";
+    doc[F("state")] = emontx_state_to_string(state);
     doc[F("port")] = EMONTX_AVRISP_PORT;
     doc[F("reset_pin")] = EMONTX_RESET_PIN;
     
