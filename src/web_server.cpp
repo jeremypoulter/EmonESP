@@ -894,6 +894,12 @@ void handleEmonTxFirmwareUpload(AsyncWebServerRequest *request, String filename,
     DBUGF("EmonTX firmware upload start: %s", filename.c_str());
     emonTxUploadInProgress = true;
     emonTxUploadComplete = false;
+    
+    // Close any previously opened file to ensure clean state
+    if (emonTxFirmwareFile) {
+      emonTxFirmwareFile.close();
+    }
+    
     emonTxFirmwareFilename = "/emontx_" + filename;
     emonTxFirmwareFile = SPIFFS.open(emonTxFirmwareFilename, "w");
     if (!emonTxFirmwareFile) {

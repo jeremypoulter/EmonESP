@@ -159,14 +159,21 @@ static int programHexFile(File& hexFile) {
     String line = hexFile.readStringUntil('\n');
     line.trim();
     
-    if (line.length() == 0 || line[0] != ':') {
+    // Minimum valid HEX record: :LLAAAATTCC (11 characters)
+    if (line.length() < 11 || line[0] != ':') {
       continue;
     }
     
-    // Parse HEX record
+    // Parse HEX record header
     uint8_t byteCount = strtol(line.substring(1, 3).c_str(), NULL, 16);
     uint16_t address = strtol(line.substring(3, 7).c_str(), NULL, 16);
     uint8_t recordType = strtol(line.substring(7, 9).c_str(), NULL, 16);
+    
+    // Verify line is long enough for the data bytes
+    if (line.length() < (9 + byteCount * 2 + 2)) {
+      DBUGF("Invalid HEX record length at address 0x%04X", address);
+      continue;
+    }
     
     if (recordType == 0x00) {  // Data record
       // Check if this is a new page boundary
@@ -189,6 +196,13 @@ static int programHexFile(File& hexFile) {
       for (uint8_t i = 0; i < byteCount; i++) {
         uint8_t dataByte = strtol(line.substring(9 + i*2, 11 + i*2).c_str(), NULL, 16);
         uint16_t offset = (address + i) & PAGE_OFFSET_MASK;  // Offset within page
+        
+        // Bounds check to prevent buffer overflow
+        if (offset >= ATMEGA328_PAGE_SIZE) {
+          DBUGF("Invalid offset %u at address 0x%04X", offset, address + i);
+          continue;
+        }
+        
         pageBuffer[offset] = dataByte;
         if (offset >= maxPageOffset) {
           maxPageOffset = offset + 1;
@@ -197,7 +211,8 @@ static int programHexFile(File& hexFile) {
     } else if (recordType == 0x01) {  // End of file
       // Write final page
       if (pageStarted && maxPageOffset > 0) {
-        // Pad to page boundary for final page
+        // Pad to full page boundary for final write
+        // This ensures any partial page is properly terminated with 0xFF
         if (maxPageOffset < ATMEGA328_PAGE_SIZE) {
           maxPageOffset = ATMEGA328_PAGE_SIZE;
         }
