@@ -879,27 +879,40 @@ void handleCtrlMode(AsyncWebServerRequest *request)
 // -------------------------------------------------------------------
 static File emonTxFirmwareFile;
 static String emonTxFirmwareFilename;
+static bool emonTxUploadInProgress = false;
+static bool emonTxUploadComplete = false;
 
 void handleEmonTxFirmwareUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final)
 {
   if (!index) {
+    // Prevent concurrent uploads
+    if (emonTxUploadInProgress) {
+      DBUGLN("EmonTX firmware upload already in progress");
+      return;
+    }
+    
     DBUGF("EmonTX firmware upload start: %s", filename.c_str());
+    emonTxUploadInProgress = true;
+    emonTxUploadComplete = false;
     emonTxFirmwareFilename = "/emontx_" + filename;
     emonTxFirmwareFile = SPIFFS.open(emonTxFirmwareFilename, "w");
     if (!emonTxFirmwareFile) {
       DBUGLN("Failed to open file for writing");
+      emonTxUploadInProgress = false;
       return;
     }
   }
   
-  if (emonTxFirmwareFile) {
+  if (emonTxFirmwareFile && emonTxUploadInProgress) {
     emonTxFirmwareFile.write(data, len);
   }
   
   if (final) {
     if (emonTxFirmwareFile) {
       emonTxFirmwareFile.close();
+      emonTxUploadComplete = true;
     }
+    emonTxUploadInProgress = false;
     DBUGF("EmonTX firmware upload complete: %u bytes", index + len);
   }
 }
@@ -912,9 +925,9 @@ void handleEmonTxFirmwarePost(AsyncWebServerRequest *request)
     return;
   }
 
-  if (emonTxFirmwareFilename.length() == 0) {
+  if (!emonTxUploadComplete || emonTxFirmwareFilename.length() == 0) {
     response->setCode(400);
-    response->print(F("No file uploaded"));
+    response->print(F("No file uploaded or upload incomplete"));
     request->send(response);
     return;
   }
@@ -932,9 +945,19 @@ void handleEmonTxFlash(AsyncWebServerRequest *request)
     return;
   }
 
-  if (emonTxFirmwareFilename.length() == 0) {
+  if (!emonTxUploadComplete || emonTxFirmwareFilename.length() == 0) {
     response->setCode(400);
-    response->print(F("{\"error\":\"No firmware file uploaded\"}"));
+    response->print(F("{\"error\":\"No firmware file uploaded or upload incomplete\"}"));
+    request->send(response);
+    return;
+  }
+
+  // Verify file exists and is readable
+  if (!SPIFFS.exists(emonTxFirmwareFilename)) {
+    response->setCode(400);
+    response->print(F("{\"error\":\"Uploaded firmware file not found\"}"));
+    emonTxUploadComplete = false;
+    emonTxFirmwareFilename = "";
     request->send(response);
     return;
   }
@@ -953,6 +976,7 @@ void handleEmonTxFlash(AsyncWebServerRequest *request)
     // Clean up the firmware file after successful flash
     SPIFFS.remove(emonTxFirmwareFilename);
     emonTxFirmwareFilename = "";
+    emonTxUploadComplete = false;
   }
   
   response->setCode(result == FLASH_SUCCESS ? 200 : 500);

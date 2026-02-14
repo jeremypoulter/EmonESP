@@ -42,6 +42,11 @@
 
 #define BOOTLOADER_TIMEOUT  1000  // ms
 
+// ATmega328 flash page size and alignment constants
+#define ATMEGA328_PAGE_SIZE     128
+#define PAGE_ALIGNMENT_MASK     0xFF80  // Mask for 128-byte page boundary
+#define PAGE_OFFSET_MASK        0x7F    // Mask for offset within 128-byte page
+
 static uint8_t resetPin = EMONTX_RESET_PIN;
 static uint32_t normalBaudRate = 115200;
 
@@ -145,9 +150,9 @@ static bool programPage(uint16_t address, uint8_t* data, uint16_t length) {
 // Parse Intel HEX format and program the device
 // Simple parser for :LLAAAATT[DD...]CC format
 static int programHexFile(File& hexFile) {
-  uint8_t pageBuffer[128];  // ATmega328 has 128-byte pages
+  uint8_t pageBuffer[ATMEGA328_PAGE_SIZE];  // ATmega328 page buffer
   uint16_t pageAddress = 0;
-  uint16_t pageIndex = 0;
+  uint16_t maxPageOffset = 0;  // Track highest offset written in current page
   bool pageStarted = false;
   
   while (hexFile.available()) {
@@ -164,18 +169,18 @@ static int programHexFile(File& hexFile) {
     uint8_t recordType = strtol(line.substring(7, 9).c_str(), NULL, 16);
     
     if (recordType == 0x00) {  // Data record
-      // Check if this is a new page
-      if (!pageStarted || (address & 0xFF80) != (pageAddress & 0xFF80)) {
+      // Check if this is a new page boundary
+      if (!pageStarted || (address & PAGE_ALIGNMENT_MASK) != (pageAddress & PAGE_ALIGNMENT_MASK)) {
         // Write previous page if it exists
-        if (pageStarted && pageIndex > 0) {
-          if (!programPage(pageAddress, pageBuffer, pageIndex)) {
+        if (pageStarted && maxPageOffset > 0) {
+          if (!programPage(pageAddress, pageBuffer, maxPageOffset)) {
             return FLASH_ERROR_PAGE_WRITE;
           }
         }
         
         // Start new page
         pageAddress = address;
-        pageIndex = 0;
+        maxPageOffset = 0;
         pageStarted = true;
         memset(pageBuffer, 0xFF, sizeof(pageBuffer));
       }
@@ -183,20 +188,20 @@ static int programHexFile(File& hexFile) {
       // Add data to page buffer
       for (uint8_t i = 0; i < byteCount; i++) {
         uint8_t dataByte = strtol(line.substring(9 + i*2, 11 + i*2).c_str(), NULL, 16);
-        uint16_t offset = (address + i) & 0x7F;  // Offset within page
+        uint16_t offset = (address + i) & PAGE_OFFSET_MASK;  // Offset within page
         pageBuffer[offset] = dataByte;
-        if (offset >= pageIndex) {
-          pageIndex = offset + 1;
+        if (offset >= maxPageOffset) {
+          maxPageOffset = offset + 1;
         }
       }
     } else if (recordType == 0x01) {  // End of file
       // Write final page
-      if (pageStarted && pageIndex > 0) {
-        // Pad to page boundary
-        while (pageIndex < 128) {
-          pageBuffer[pageIndex++] = 0xFF;
+      if (pageStarted && maxPageOffset > 0) {
+        // Pad to page boundary for final page
+        if (maxPageOffset < ATMEGA328_PAGE_SIZE) {
+          maxPageOffset = ATMEGA328_PAGE_SIZE;
         }
-        if (!programPage(pageAddress, pageBuffer, 128)) {
+        if (!programPage(pageAddress, pageBuffer, maxPageOffset)) {
           return FLASH_ERROR_PAGE_WRITE;
         }
       }
