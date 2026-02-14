@@ -81,16 +81,16 @@ void emontx_update_loop() {
     last_state = new_state;
   }
   
-  // Serve programming requests when not idle
-  if (last_state != AVRISP_STATE_IDLE) {
-    emontx_programmer->serve();
-  }
+  // Always serve to handle incoming connections and programming requests
+  emontx_programmer->serve();
 }
 
 AVRISPState_t emontx_update_state() {
   if (emontx_programmer == NULL) {
     return AVRISP_STATE_IDLE;
   }
+  // Note: update() checks for state changes, doesn't perform actions
+  // This is safe to call multiple times per request cycle
   return emontx_programmer->update();
 }
 
