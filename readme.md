@@ -137,7 +137,25 @@ Displays free system memory and firmware version
 
 ## OTA Firmware Update
 
+EmonESP supports over-the-air (OTA) firmware updates for both the ESP8266 itself and connected EmonTX devices.
+
+### ESP8266 Firmware Update
+
 TBC
+
+### EmonTX Firmware Update
+
+EmonESP can now update the firmware on connected EmonTX devices (ATmega328-based) over WiFi using the built-in AVR programmer. This allows you to remotely update your EmonTX without physical access.
+
+See the [EmonTX Firmware Update Guide](docs/EMONTX_UPDATE.md) for detailed instructions on:
+- Hardware setup and wiring
+- Programming via avrdude
+- Troubleshooting tips
+
+Quick example:
+```bash
+avrdude -c arduino -p m328p -P net:<ESP_IP>:328 -U flash:w:firmware.hex:i
+```
 
 ## HTTP API Examples
 
