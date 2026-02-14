@@ -41,6 +41,7 @@
 #include "emoncms.h"
 #include "ota.h"
 #include "debug.h"
+#include "emontx_update.h"
 #include <NTPClient.h>
 #include "espal.h"
 
@@ -872,6 +873,123 @@ void handleCtrlMode(AsyncWebServerRequest *request)
   request->send(response);
 }
 
+// -------------------------------------------------------------------
+// Handle EmonTX firmware upload
+// url: /emontx/upload
+// -------------------------------------------------------------------
+static File emonTxFirmwareFile;
+static String emonTxFirmwareFilename;
+static bool emonTxUploadInProgress = false;
+static bool emonTxUploadComplete = false;
+
+void handleEmonTxFirmwareUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final)
+{
+  if (!index) {
+    // Prevent concurrent uploads
+    if (emonTxUploadInProgress) {
+      DBUGLN("EmonTX firmware upload already in progress");
+      return;
+    }
+    
+    DBUGF("EmonTX firmware upload start: %s", filename.c_str());
+    emonTxUploadInProgress = true;
+    emonTxUploadComplete = false;
+    
+    // Close any previously opened file to ensure clean state
+    if (emonTxFirmwareFile) {
+      emonTxFirmwareFile.close();
+    }
+    
+    emonTxFirmwareFilename = "/emontx_" + filename;
+    emonTxFirmwareFile = SPIFFS.open(emonTxFirmwareFilename, "w");
+    if (!emonTxFirmwareFile) {
+      DBUGLN("Failed to open file for writing");
+      emonTxUploadInProgress = false;
+      return;
+    }
+  }
+  
+  if (emonTxFirmwareFile && emonTxUploadInProgress) {
+    emonTxFirmwareFile.write(data, len);
+  }
+  
+  if (final) {
+    if (emonTxFirmwareFile) {
+      emonTxFirmwareFile.close();
+      emonTxUploadComplete = true;
+    }
+    emonTxUploadInProgress = false;
+    DBUGF("EmonTX firmware upload complete: %u bytes", index + len);
+  }
+}
+
+void handleEmonTxFirmwarePost(AsyncWebServerRequest *request)
+{
+  AsyncResponseStream *response;
+  if (false == requestPreProcess(request, response))
+  {
+    return;
+  }
+
+  if (!emonTxUploadComplete || emonTxFirmwareFilename.length() == 0) {
+    response->setCode(400);
+    response->print(F("No file uploaded or upload incomplete"));
+    request->send(response);
+    return;
+  }
+
+  response->setCode(200);
+  response->print(F("Upload complete. Call /emontx/flash to program the firmware."));
+  request->send(response);
+}
+
+void handleEmonTxFlash(AsyncWebServerRequest *request)
+{
+  AsyncResponseStream *response;
+  if (false == requestPreProcess(request, response, CONTENT_TYPE_JSON))
+  {
+    return;
+  }
+
+  if (!emonTxUploadComplete || emonTxFirmwareFilename.length() == 0) {
+    response->setCode(400);
+    response->print(F("{\"error\":\"No firmware file uploaded or upload incomplete\"}"));
+    request->send(response);
+    return;
+  }
+
+  // Verify file exists and is readable
+  if (!SPIFFS.exists(emonTxFirmwareFilename)) {
+    response->setCode(400);
+    response->print(F("{\"error\":\"Uploaded firmware file not found\"}"));
+    emonTxUploadComplete = false;
+    emonTxFirmwareFilename = "";
+    request->send(response);
+    return;
+  }
+
+  DBUGF("Starting EmonTX firmware flash: %s", emonTxFirmwareFilename.c_str());
+  int result = emontx_flash_firmware(emonTxFirmwareFilename.c_str());
+  
+  const size_t capacity = JSON_OBJECT_SIZE(3) + 128;
+  DynamicJsonDocument doc(capacity);
+  
+  doc[F("success")] = (result == FLASH_SUCCESS);
+  doc[F("code")] = result;
+  doc[F("message")] = emontx_flash_error_string(result);
+  
+  if (result == FLASH_SUCCESS) {
+    // Clean up the firmware file after successful flash
+    SPIFFS.remove(emonTxFirmwareFilename);
+    emonTxFirmwareFilename = "";
+    emonTxUploadComplete = false;
+  }
+  
+  response->setCode(result == FLASH_SUCCESS ? 200 : 500);
+  serializeJson(doc, *response);
+  request->send(response);
+}
+
 void handleDebug(AsyncWebServerRequest *request, StreamSpy &spy)
 {
   AsyncResponseStream *response;
@@ -1028,6 +1146,10 @@ void web_server_setup()
 
   server.on("/firmware", handleUpdateCheck);
   server.on("/update", handleUpdate);
+  
+  // EmonTX firmware upload and flashing
+  server.on("/emontx/upload", HTTP_POST, handleEmonTxFirmwarePost, handleEmonTxFirmwareUpload);
+  server.on("/emontx/flash", HTTP_POST, handleEmonTxFlash);
 
   // Remote debug consoles
   server.on("/debug", [](AsyncWebServerRequest *request)

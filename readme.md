@@ -137,7 +137,27 @@ Displays free system memory and firmware version
 
 ## OTA Firmware Update
 
+### ESP8266 Firmware Update
+
 TBC
+
+### EmonTX Firmware Update
+
+EmonESP can now update the firmware on connected EmonTX devices (ATmega328-based) via the existing serial/UART connection using the STK500 protocol and Optiboot bootloader.
+
+See the [EmonTX Firmware Update Guide](docs/EMONTX_UPDATE.md) for detailed instructions on:
+- Hardware setup and wiring requirements
+- Uploading and flashing firmware via HTTP API
+- Troubleshooting common issues
+
+Quick example:
+```bash
+# Upload firmware hex file
+curl -F "file=@firmware.hex" http://<ESP_IP>/emontx/upload
+
+# Flash to EmonTX
+curl -X POST http://<ESP_IP>/emontx/flash
+```
 
 ## HTTP API Examples
 
